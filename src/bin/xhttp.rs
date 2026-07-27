@@ -22,7 +22,7 @@ struct XhttpSession {
 static SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, XhttpSession>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-// Cache do ServerConfig TLS (Arc<ServerConfig> é clonável e aceito por TlsAcceptor)
+// Cache do ServerConfig TLS (evita reparse de certificados)
 static TLS_SERVER_CONFIG_CACHE: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<rustls::ServerConfig>>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
@@ -32,7 +32,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[Mpro] xHTTP v3.5.0 (Ultra Fast Connect + TLS Cache + SocksRevive Optimized)");
+    println!("[Mpro] xHTTP v3.6.0 (Latency Optimized + Low Latency Networks)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     // Pré-carrega TLS config para conexões instantâneas
@@ -46,6 +46,17 @@ async fn main() -> Result<(), XhttpError> {
             Ok((client_stream, _addr)) => {
                 // TCP_NODELAY para eliminar latência do Nagle algorithm
                 let _ = client_stream.set_nodelay(true);
+                // TCP_QUICKACK para redes com alta latência (ACK imediato, sem delay)
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::fd::AsRawFd;
+                    let fd = client_stream.as_raw_fd();
+                    unsafe {
+                        // TCP_QUICKACK = 12, setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &val, sizeof(val))
+                        let val: libc::c_int = 1;
+                        libc::setsockopt(fd, libc::IPPROTO_TCP, 12, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
+                    }
+                }
 
                 let status = status_arc.clone();
                 tokio::spawn(async move {
@@ -64,7 +75,6 @@ fn preload_tls_config() {
     let cert_path = "/opt/mpro/cert.pem";
     let key_path = "/opt/mpro/key.pem";
     if let Ok(config) = build_tls_config(cert_path, key_path) {
-        // Armazena no cache para reutilização
         let _ = TLS_SERVER_CONFIG_CACHE.try_lock().map(|mut cache| {
             *cache = Some(Arc::new(config));
         });
@@ -76,9 +86,9 @@ async fn handle_xhttp_client(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
-    // OTIMIZADO: Peek de 300ms para detecção rápida
+    // OTIMIZADO: Peek de 200ms — ultra rápido para detectar tipo de conexão
     let mut peek_buf = [0u8; 4];
-    let peek_result = timeout(Duration::from_millis(300), stream.peek(&mut peek_buf)).await;
+    let peek_result = timeout(Duration::from_millis(200), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => 0,
@@ -109,14 +119,14 @@ async fn handle_tls_dual(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
-    // Usa TLS config em cache (evita reparse de certificados a cada conexão)
+    // Usa TLS config em cache (evita reparse de certificados)
     let acceptor = get_cached_acceptor()?;
 
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
 
     let mut buf = vec![0u8; 16384];
-    // OTIMIZADO: 2s timeout para HTTP read
-    let n = match timeout(Duration::from_secs(2), tls_stream.read(&mut buf)).await {
+    // OTIMIZADO: 1.5s timeout para HTTP read (reduzido de 2s)
+    let n = match timeout(Duration::from_millis(1500), tls_stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => {
             return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
@@ -207,7 +217,7 @@ async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpSt
     Ok(())
 }
 
-// --- XHTTP Acceleration Logic (Ultra Fast Connect) ---
+// --- XHTTP Acceleration Logic (Ultra Fast + Low Latency Optimized) ---
 
 async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
@@ -223,11 +233,13 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
 
     // *** OTIMIZAÇÃO ULTRA: Resposta 200 IMEDIATA antes de conectar SSH ***
     // Isso elimina o travamento "Conectando" — o cliente recebe 200 instantaneamente
+    // Connection: keep-alive permite reusar a mesma conexão TCP para POSTs seguintes
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
+        Keep-Alive: timeout=30, max=100\r\n\
         Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
         Pragma: no-cache\r\n\
         Expires: 0\r\n\
@@ -240,16 +252,16 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
     tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
     // Conecta SSH em paralelo (já não bloqueia o cliente — resposta 200 já foi enviada)
-    let ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port)))
+    let ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port)))
         .await
         .map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?
         .map_err(|e| Box::new(e) as XhttpError)?;
     let _ = ssh.set_nodelay(true);
     let (mut sr, mut sw) = ssh.into_split();
 
-    // Canal maior (8192) para menos backpressure
-    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(8192);
-    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(8192);
+    // Canal grande (16384) para reduzir backpressure em redes com alta latência
+    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(16384);
+    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(16384);
     let act = Arc::new(RwLock::new(true));
     
     SESSIONS.lock().await.insert(sid.clone(), XhttpSession { 
@@ -316,6 +328,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
+        Keep-Alive: timeout=30, max=100\r\n\
         Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
         Pragma: no-cache\r\n\
         Expires: 0\r\n\
@@ -332,8 +345,8 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     let _ = ssh.set_nodelay(true);
     let (mut sr, mut sw) = ssh.into_split();
 
-    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(8192);
-    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(8192);
+    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(16384);
+    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(16384);
     let act = Arc::new(RwLock::new(true));
 
     SESSIONS.lock().await.insert(sid.clone(), XhttpSession { 
@@ -387,6 +400,7 @@ async fn handle_xhttp_post_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStre
     let h_end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let mut body = req[h_end..].to_vec();
     
+    // Lê o corpo completo do POST (sem timeout — mais rápido em redes lentas)
     if body.len() < cl {
         let mut b = vec![0u8; cl - body.len()];
         let _ = tls.read_exact(&mut b).await;
@@ -397,8 +411,8 @@ async fn handle_xhttp_post_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStre
         let _ = s.post_tx.try_send(body); // try_send evita bloqueio se canal estiver cheio
     }
     
-    // Resposta 200 com keep-alive para próxima POST rápida
-    let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nX-Socksrevive: ack\r\n\r\n").await;
+    // Resposta 200 com keep-alive para próxima POST rápida (evita nova conexão TCP)
+    let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30\r\nX-Socksrevive: ack\r\n\r\n").await;
     let _ = tls.flush().await;
     Ok(())
 }
@@ -419,7 +433,8 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, req: &[u8], path: &str, _
         let _ = s.post_tx.try_send(body);
     }
     
-    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nX-Socksrevive: ack\r\n\r\n").await;
+    // Resposta 200 com keep-alive para reutilizar conexão TCP
+    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30\r\nX-Socksrevive: ack\r\n\r\n").await;
     let _ = stream.flush().await;
     Ok(())
 }
