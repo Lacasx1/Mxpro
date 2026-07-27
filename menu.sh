@@ -193,7 +193,7 @@ open_xhttp() {
     show_banner
     echo ""
     box_top
-    box_line "${WHITE}${BOLD}xHTTP_SSH / SSL TUNNEL - Porta 443${NC}"
+    box_line "${WHITE}${BOLD}xHTTP Pro Otimizado / SSL TUNNEL - Porta 443${NC}"
     box_bottom
     echo ""
     read -p "Status HTTP (Padrão: @Mpro): " STATUS
@@ -312,7 +312,7 @@ show_menu() {
     box_line "${WHITE}[01]${NC} - ABRIR PORTA"
     box_line "${WHITE}[02]${NC} - FECHAR PORTA"
     box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
-    box_line "${MAGENTA}[04]${NC} - xHTTP_SSH / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
+    box_line "${MAGENTA}[04]${NC} - xHTTP Pro Otimizado / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
     box_line "${BLUE}[05]${NC} - PROXY + PROTOCOLO INTEGRADO"
     box_line ""
     box_line "${WHITE}[00]${NC} - SAIR"

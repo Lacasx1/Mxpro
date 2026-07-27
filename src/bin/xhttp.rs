@@ -116,7 +116,7 @@ async fn handle_tls_dual(
     if http_str.contains("x-session-id") 
         || http_str.contains("/ssh/") 
         || http_str.contains("/xhttp/") 
-        || http_str.contains("/split/")
+
         || http_str.contains("/revive/") 
         || http_str.contains("X-Session")
     {
@@ -147,7 +147,7 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     if http_str.contains("x-session-id") 
         || http_str.contains("/ssh/") 
         || http_str.contains("/xhttp/") 
-        || http_str.contains("/split/")
+
         || http_str.contains("/revive/")
         || http_str.contains("X-Session")
     {
@@ -208,10 +208,17 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         sessions.remove(&sid);
     }
 
-    // *** OTIMIZAÇÃO PRINCIPAL: Envia resposta HTTP 200 IMEDIATAMENTE antes de conectar SSH ***
-    // Isso elimina o travamento "Conectando" — o cliente recebe confirmação instantânea
+    // *** OTIMIZAÇÃO PRINCIPAL: Conecta SSH primeiro mas com timeout agressivo ***
+    // Tentar conectar ao SSH primeiro garante que os dados iniciais do cliente não sejam perdidos
+    let ssh_conn = timeout(Duration::from_millis(500), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
+    
+    let (ssh, resp_status) = match ssh_conn {
+        Ok(Ok(s)) => (Some(s), "200 OK"),
+        _ => (None, "200 OK"), // Ainda retorna 200 para o cliente não travar, mas tentará reconectar o SSH na primeira escrita
+    };
+
     let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
+        "HTTP/1.1 {}\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
@@ -221,17 +228,18 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         X-Session-ID: {}\r\n\
         X-Status: {}\r\n\
         X-Socksrevive: active\r\n\r\n", 
-        sid, status
+        resp_status, sid, status
     );
     tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    // Conecta SSH em paralelo (já não bloqueia o cliente)
-    let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port))
-        .await
-        .map_err(|e| Box::new(e) as XhttpError)?;
-    let _ = ssh.set_nodelay(true);
-    let (sr, mut sw) = ssh.into_split();
+    let (sr, sw) = if let Some(s) = ssh {
+        let _ = s.set_nodelay(true);
+        let (r, w) = s.into_split();
+        (Some(r), Some(w))
+    } else {
+        (None, None)
+    };
 
     // Canal maior (8192) para menos backpressure
     let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(8192);
@@ -244,27 +252,40 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         active: act.clone() 
     });
     
-    // Task: Encaminha dados POST -> SSH (write)
+    // Task: Encaminha dados POST -> SSH (write) com reconexão automática se falhou inicialmente
     let act_c = act.clone();
+    let ssh_port_c = ssh_port;
     tokio::spawn(async move { 
+        let mut sw = sw;
         while let Some(d) = prx.recv().await { 
-            if !*act_c.read().await { break; } 
-            if sw.write_all(&d).await.is_err() { break; }
+            if !*act_c.read().await { break; }
+            if sw.is_none() {
+                if let Ok(Ok(s)) = timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{}", ssh_port_c))).await {
+                    let _ = s.set_nodelay(true);
+                    let (_, w) = s.into_split();
+                    sw = Some(w);
+                }
+            }
+            if let Some(ref mut w) = sw {
+                if w.write_all(&d).await.is_err() { break; }
+            } else {
+                break;
+            }
         }
         let mut a = act_c.write().await;
         *a = false;
     });
 
     // Task: Lê dados do SSH -> Canal GET (read)
-    // Buffer maior (65536) para throughput máximo
     let gtx_c = gtx.clone();
     let act_c2 = act.clone();
     tokio::spawn(async move { 
-        let mut sr = sr;
-        let mut b = vec![0u8; 65536]; 
-        while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
-            if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
-            if !*act_c2.read().await { break; }
+        if let Some(mut sr) = sr {
+            let mut b = vec![0u8; 65536]; 
+            while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
+                if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
+                if !*act_c2.read().await { break; }
+            }
         }
         let mut a = act_c2.write().await;
         *a = false;
@@ -298,9 +319,16 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         sessions.remove(&sid);
     }
 
-    // *** OTIMIZAÇÃO: Resposta 200 imediata antes de conectar SSH ***
+    // *** OTIMIZAÇÃO: Conecta SSH primeiro com timeout agressivo ***
+    let ssh_conn = timeout(Duration::from_millis(500), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
+    
+    let (ssh, resp_status) = match ssh_conn {
+        Ok(Ok(s)) => (Some(s), "200 OK"),
+        _ => (None, "200 OK"),
+    };
+
     let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
+        "HTTP/1.1 {}\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
@@ -310,15 +338,18 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         X-Session-ID: {}\r\n\
         X-Status: {}\r\n\
         X-Socksrevive: active\r\n\r\n", 
-        sid, status
+        resp_status, sid, status
     );
     stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    // Conecta SSH (sem timeout — agora não bloqueia o cliente)
-    let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
-    let _ = ssh.set_nodelay(true);
-    let (sr, mut sw) = ssh.into_split();
+    let (sr, sw) = if let Some(s) = ssh {
+        let _ = s.set_nodelay(true);
+        let (r, w) = s.into_split();
+        (Some(r), Some(w))
+    } else {
+        (None, None)
+    };
 
     let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(8192);
     let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(8192);
@@ -331,10 +362,23 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     });
     
     let act_c = act.clone();
+    let ssh_port_c = ssh_port;
     tokio::spawn(async move { 
+        let mut sw = sw;
         while let Some(d) = prx.recv().await { 
             if !*act_c.read().await { break; }
-            if sw.write_all(&d).await.is_err() { break; }
+            if sw.is_none() {
+                if let Ok(Ok(s)) = timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{}", ssh_port_c))).await {
+                    let _ = s.set_nodelay(true);
+                    let (_, w) = s.into_split();
+                    sw = Some(w);
+                }
+            }
+            if let Some(ref mut w) = sw {
+                if w.write_all(&d).await.is_err() { break; }
+            } else {
+                break;
+            }
         } 
         let mut a = act_c.write().await;
         *a = false;
@@ -343,11 +387,12 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     let gtx_c = gtx.clone();
     let act_c2 = act.clone();
     tokio::spawn(async move { 
-        let mut sr = sr;
-        let mut b = vec![0u8; 65536]; 
-        while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
-            if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
-            if !*act_c2.read().await { break; }
+        if let Some(mut sr) = sr {
+            let mut b = vec![0u8; 65536]; 
+            while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
+                if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
+                if !*act_c2.read().await { break; }
+            }
         }
         let mut a = act_c2.write().await;
         *a = false;
@@ -422,7 +467,7 @@ fn extract_path_info(path: &str) -> (String, Option<u64>) {
     if p.is_empty() || p[0].is_empty() { return (String::new(), None); }
     if p.len() >= 2 {
         // Suporte para paths: /ssh/{id}, /xhttp/{id}, /split/{id}, /revive/{id}
-        if ["ssh", "xhttp", "split", "revive"].contains(&p[0]) {
+        if ["ssh", "xhttp", "revive"].contains(&p[0]) {
             return (p[1].to_string(), if p.len() >= 3 { p[2].parse().ok() } else { None });
         }
         // Se só tem 1 segmento, usa como session ID

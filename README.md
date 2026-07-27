@@ -1,12 +1,12 @@
-# Mpro v2.0 - com suporte xHTTP (SplitHTTP)
+# Mpro v2.0 - com suporte xHTTP Pro (Otimizado)
 
-Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP (SplitHTTP) na porta 443, compatível com o cliente **XHTTP-DEMO**.
+Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP Pro (Otimizado) na porta 443, compatível com o cliente **XHTTP-DEMO** e **SocksRevive**.
 
 ## O que mudou na v2.0
 
 | Recurso | v1.0 | v2.0 |
 |---------|------|------|
-| xHTTP/SplitHTTP exclusivo | Não | Sim (opção 04) |
+| xHTTP Pro Otimizado | Não | Sim (opção 04) |
 | TLS termination | Passthrough | Terminação com rustls |
 | Porta 443 automática | Manual | Automática (opção 04) |
 | Certificados auto-assinados | Não | Gerados automaticamente |
@@ -51,9 +51,9 @@ mpro    # Menu interativo
 ╚══════════════════════════════════╝
 ```
 
-### Opção 04 - xHTTP SplitHTTP (Porta 443)
+### Opção 04 - xHTTP Pro Otimizado (Porta 443)
 
-Esta opção é **exclusiva** para o protocolo xHTTP (SplitHTTP) e funciona assim:
+Esta opção é **exclusiva** para o protocolo xHTTP Pro (Otimizado para Fast Connect) e funciona assim:
 
 1. **Porta fixa 443** - Não pode ser alterada
 2. **TLS obrigatório** - Certificado auto-assinado gerado automaticamente
