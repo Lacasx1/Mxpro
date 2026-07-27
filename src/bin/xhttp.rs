@@ -22,14 +22,21 @@ struct XhttpSession {
 static SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, XhttpSession>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+// Cache do ServerConfig TLS (Arc<ServerConfig> é clonável e aceito por TlsAcceptor)
+static TLS_SERVER_CONFIG_CACHE: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<rustls::ServerConfig>>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
 #[tokio::main]
 async fn main() -> Result<(), XhttpError> {
     let port = get_port();
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[Mpro] xHTTP v3.4.0 (Fast Connect + SocksRevive Optimized)");
+    println!("[Mpro] xHTTP v3.5.0 (Ultra Fast Connect + TLS Cache + SocksRevive Optimized)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
+
+    // Pré-carrega TLS config para conexões instantâneas
+    preload_tls_config();
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let status_arc = Arc::new(status);
@@ -52,14 +59,26 @@ async fn main() -> Result<(), XhttpError> {
     }
 }
 
+/// Pré-carrega a configuração TLS para evitar delay na primeira conexão
+fn preload_tls_config() {
+    let cert_path = "/opt/mpro/cert.pem";
+    let key_path = "/opt/mpro/key.pem";
+    if let Ok(config) = build_tls_config(cert_path, key_path) {
+        // Armazena no cache para reutilização
+        let _ = TLS_SERVER_CONFIG_CACHE.try_lock().map(|mut cache| {
+            *cache = Some(Arc::new(config));
+        });
+    }
+}
+
 async fn handle_xhttp_client(
     stream: TcpStream,
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
-    // OTIMIZADO: Reduzido para 500ms para conexão instantânea
-    let mut peek_buf = [0u8; 3];
-    let peek_result = timeout(Duration::from_millis(500), stream.peek(&mut peek_buf)).await;
+    // OTIMIZADO: Peek de 300ms para detecção rápida
+    let mut peek_buf = [0u8; 4];
+    let peek_result = timeout(Duration::from_millis(300), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => 0,
@@ -90,19 +109,14 @@ async fn handle_tls_dual(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
-    let cert_path = "/opt/mpro/cert.pem";
-    let key_path = "/opt/mpro/key.pem";
+    // Usa TLS config em cache (evita reparse de certificados a cada conexão)
+    let acceptor = get_cached_acceptor()?;
 
-    let mut config = build_tls_config(cert_path, key_path)?;
-    // Força ALPN http/1.1 para evitar fallback para h2 que pode causar delay
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-    let acceptor = TlsAcceptor::from(Arc::new(config));
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    let mut buf = vec![0u8; 8192];
-    // REDUZIDO de 5s para 3s — timeout mais curto para HTTP read
-    let n = match timeout(Duration::from_secs(3), tls_stream.read(&mut buf)).await {
+    let mut buf = vec![0u8; 16384];
+    // OTIMIZADO: 2s timeout para HTTP read
+    let n = match timeout(Duration::from_secs(2), tls_stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => {
             return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
@@ -112,10 +126,12 @@ async fn handle_tls_dual(
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    // OTIMIZADO: Foco exclusivo em xHTTP para maior velocidade
+    // Detecta xHTTP/SocksRevive paths
     if http_str.contains("x-session-id") 
         || http_str.contains("/ssh/") 
         || http_str.contains("/xhttp/") 
+        || http_str.contains("/split/")
+        || http_str.contains("/revive/")
         || http_str.contains("X-Session")
     {
         if let Some((method, path)) = parse_http_request(&http_str) {
@@ -141,10 +157,11 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
     
-    // OTIMIZADO: Foco exclusivo em xHTTP
     if http_str.contains("x-session-id") 
         || http_str.contains("/ssh/") 
         || http_str.contains("/xhttp/") 
+        || http_str.contains("/split/")
+        || http_str.contains("/revive/")
         || http_str.contains("X-Session")
     {
         if let Some((method, path)) = parse_http_request(&http_str) {
@@ -190,7 +207,7 @@ async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpSt
     Ok(())
 }
 
-// --- XHTTP Acceleration Logic (Otimizado para Fast Connect) ---
+// --- XHTTP Acceleration Logic (Ultra Fast Connect) ---
 
 async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
@@ -204,16 +221,10 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         sessions.remove(&sid);
     }
 
-    // *** OTIMIZAÇÃO ULTRA: Conexão SSH imediata com timeout de 300ms ***
-    let ssh_conn = timeout(Duration::from_millis(300), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
-    
-    let (ssh, resp_status) = match ssh_conn {
-        Ok(Ok(s)) => (Some(s), "200 OK"),
-        _ => (None, "200 OK"), // Ainda retorna 200 para o cliente não travar, mas tentará reconectar o SSH na primeira escrita
-    };
-
+    // *** OTIMIZAÇÃO ULTRA: Resposta 200 IMEDIATA antes de conectar SSH ***
+    // Isso elimina o travamento "Conectando" — o cliente recebe 200 instantaneamente
     let resp = format!(
-        "HTTP/1.1 {}\r\n\
+        "HTTP/1.1 200 OK\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
@@ -223,18 +234,18 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         X-Session-ID: {}\r\n\
         X-Status: {}\r\n\
         X-Socksrevive: active\r\n\r\n", 
-        resp_status, sid, status
+        sid, status
     );
     tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    let (sr, sw) = if let Some(s) = ssh {
-        let _ = s.set_nodelay(true);
-        let (r, w) = s.into_split();
-        (Some(r), Some(w))
-    } else {
-        (None, None)
-    };
+    // Conecta SSH em paralelo (já não bloqueia o cliente — resposta 200 já foi enviada)
+    let ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port)))
+        .await
+        .map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?
+        .map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = ssh.set_nodelay(true);
+    let (mut sr, mut sw) = ssh.into_split();
 
     // Canal maior (8192) para menos backpressure
     let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(8192);
@@ -247,25 +258,12 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         active: act.clone() 
     });
     
-    // Task: Encaminha dados POST -> SSH (write) com reconexão automática se falhou inicialmente
+    // Task: Encaminha dados POST -> SSH (write)
     let act_c = act.clone();
-    let ssh_port_c = ssh_port;
     tokio::spawn(async move { 
-        let mut sw = sw;
         while let Some(d) = prx.recv().await { 
             if !*act_c.read().await { break; }
-            if sw.is_none() {
-                if let Ok(Ok(s)) = timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{}", ssh_port_c))).await {
-                    let _ = s.set_nodelay(true);
-                    let (_, w) = s.into_split();
-                    sw = Some(w);
-                }
-            }
-            if let Some(ref mut w) = sw {
-                if w.write_all(&d).await.is_err() { break; }
-            } else {
-                break;
-            }
+            if sw.write_all(&d).await.is_err() { break; }
         }
         let mut a = act_c.write().await;
         *a = false;
@@ -275,12 +273,10 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
     let gtx_c = gtx.clone();
     let act_c2 = act.clone();
     tokio::spawn(async move { 
-        if let Some(mut sr) = sr {
-            let mut b = vec![0u8; 65536]; 
-            while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
-                if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
-                if !*act_c2.read().await { break; }
-            }
+        let mut b = vec![0u8; 65536]; 
+        while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
+            if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
+            if !*act_c2.read().await { break; }
         }
         let mut a = act_c2.write().await;
         *a = false;
@@ -314,16 +310,9 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         sessions.remove(&sid);
     }
 
-    // *** OTIMIZAÇÃO ULTRA: Conexão SSH imediata ***
-    let ssh_conn = timeout(Duration::from_millis(300), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
-    
-    let (ssh, resp_status) = match ssh_conn {
-        Ok(Ok(s)) => (Some(s), "200 OK"),
-        _ => (None, "200 OK"),
-    };
-
+    // *** OTIMIZAÇÃO ULTRA: Resposta 200 IMEDIATA antes de conectar SSH ***
     let resp = format!(
-        "HTTP/1.1 {}\r\n\
+        "HTTP/1.1 200 OK\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
@@ -333,18 +322,15 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         X-Session-ID: {}\r\n\
         X-Status: {}\r\n\
         X-Socksrevive: active\r\n\r\n", 
-        resp_status, sid, status
+        sid, status
     );
     stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    let (sr, sw) = if let Some(s) = ssh {
-        let _ = s.set_nodelay(true);
-        let (r, w) = s.into_split();
-        (Some(r), Some(w))
-    } else {
-        (None, None)
-    };
+    // Conecta SSH em paralelo
+    let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = ssh.set_nodelay(true);
+    let (mut sr, mut sw) = ssh.into_split();
 
     let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(8192);
     let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(8192);
@@ -356,43 +342,31 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         active: act.clone() 
     });
     
+    // Task: Encaminha dados POST -> SSH (write)
     let act_c = act.clone();
-    let ssh_port_c = ssh_port;
     tokio::spawn(async move { 
-        let mut sw = sw;
         while let Some(d) = prx.recv().await { 
             if !*act_c.read().await { break; }
-            if sw.is_none() {
-                if let Ok(Ok(s)) = timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{}", ssh_port_c))).await {
-                    let _ = s.set_nodelay(true);
-                    let (_, w) = s.into_split();
-                    sw = Some(w);
-                }
-            }
-            if let Some(ref mut w) = sw {
-                if w.write_all(&d).await.is_err() { break; }
-            } else {
-                break;
-            }
+            if sw.write_all(&d).await.is_err() { break; }
         } 
         let mut a = act_c.write().await;
         *a = false;
     });
 
+    // Task: Lê dados do SSH -> Canal GET (read)
     let gtx_c = gtx.clone();
     let act_c2 = act.clone();
     tokio::spawn(async move { 
-        if let Some(mut sr) = sr {
-            let mut b = vec![0u8; 65536]; 
-            while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
-                if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
-                if !*act_c2.read().await { break; }
-            }
+        let mut b = vec![0u8; 65536]; 
+        while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
+            if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
+            if !*act_c2.read().await { break; }
         }
         let mut a = act_c2.write().await;
         *a = false;
     });
 
+    // Stream GET
     while let Some(d) = grx.recv().await {
         if !*act.read().await { break; }
         if stream.write_all(format!("{:x}\r\n", d.len()).as_bytes()).await.is_err() { break; }
@@ -413,7 +387,6 @@ async fn handle_xhttp_post_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStre
     let h_end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let mut body = req[h_end..].to_vec();
     
-    // Lê o corpo completo do POST usando read_exact (mais rápido que loop com timeout)
     if body.len() < cl {
         let mut b = vec![0u8; cl - body.len()];
         let _ = tls.read_exact(&mut b).await;
@@ -443,7 +416,7 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, req: &[u8], path: &str, _
     }
     
     if let Some(s) = SESSIONS.lock().await.get(&sid) { 
-        let _ = s.post_tx.try_send(body); // try_send para não bloquear
+        let _ = s.post_tx.try_send(body);
     }
     
     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nX-Socksrevive: ack\r\n\r\n").await;
@@ -461,8 +434,8 @@ fn extract_path_info(path: &str) -> (String, Option<u64>) {
     let p = path.split('?').next().unwrap_or(path).trim_start_matches('/').split('/').collect::<Vec<&str>>();
     if p.is_empty() || p[0].is_empty() { return (String::new(), None); }
     if p.len() >= 2 {
-        // Suporte para paths: /ssh/{id}, /xhttp/{id}
-        if ["ssh", "xhttp"].contains(&p[0]) {
+        // Suporte para paths: /ssh/{id}, /xhttp/{id}, /split/{id}, /revive/{id}
+        if ["ssh", "xhttp", "split", "revive"].contains(&p[0]) {
             return (p[1].to_string(), if p.len() >= 3 { p[2].parse().ok() } else { None });
         }
         // Se só tem 1 segmento, usa como session ID
@@ -485,16 +458,24 @@ fn build_tls_config(cp: &str, kp: &str) -> Result<rustls::ServerConfig, XhttpErr
     let certs: Vec<Certificate> = rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(cp).map_err(|e| Box::new(e) as XhttpError)?)).map_err(|e| Box::new(e) as XhttpError)?.into_iter().map(Certificate).collect();
     let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut std::io::BufReader::new(std::fs::File::open(kp).map_err(|e| Box::new(e) as XhttpError)?)).map_err(|e| Box::new(e) as XhttpError)?.into_iter().map(PrivateKey).collect();
     if certs.is_empty() || keys.is_empty() { return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Certs empty")) as XhttpError); }
-    
-    let mut c = rustls::ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(certs, keys.into_iter().next().unwrap())
-        .map_err(|e| Box::new(e) as XhttpError)?;
-    
-    // Força ALPN http/1.1 para compatibilidade máxima com SocksRevive
+    let mut c = rustls::ServerConfig::builder().with_safe_defaults().with_no_client_auth().with_single_cert(certs, keys.into_iter().next().unwrap()).map_err(|e| Box::new(e) as XhttpError)?;
     c.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(c)
+}
+
+fn get_cached_acceptor() -> Result<TlsAcceptor, XhttpError> {
+    // Tenta pegar do cache primeiro (evita reparse de certs a cada conexão)
+    if let Ok(cache) = TLS_SERVER_CONFIG_CACHE.try_lock() {
+        if let Some(config) = cache.as_ref() {
+            return Ok(TlsAcceptor::from(Arc::clone(config)));
+        }
+    }
+    
+    // Fallback: carrega do disco
+    let cert_path = "/opt/mpro/cert.pem";
+    let key_path = "/opt/mpro/key.pem";
+    let config = build_tls_config(cert_path, key_path)?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 fn get_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--port" || a == "-p").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(443) }
