@@ -57,9 +57,9 @@ async fn handle_xhttp_client(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
-    // REDUZIDO de 3s para 1.5s — conexão mais rápida
+    // OTIMIZADO: Reduzido para 500ms para conexão instantânea
     let mut peek_buf = [0u8; 3];
-    let peek_result = timeout(Duration::from_millis(1500), stream.peek(&mut peek_buf)).await;
+    let peek_result = timeout(Duration::from_millis(500), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => 0,
@@ -112,12 +112,10 @@ async fn handle_tls_dual(
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    // Detecta xHTTP/SocksRevive paths incluindo /split/ e /revive/
+    // OTIMIZADO: Foco exclusivo em xHTTP para maior velocidade
     if http_str.contains("x-session-id") 
         || http_str.contains("/ssh/") 
         || http_str.contains("/xhttp/") 
-
-        || http_str.contains("/revive/") 
         || http_str.contains("X-Session")
     {
         if let Some((method, path)) = parse_http_request(&http_str) {
@@ -143,12 +141,10 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
     
-    // Detecta xHTTP/SocksRevive paths incluindo /revive/
+    // OTIMIZADO: Foco exclusivo em xHTTP
     if http_str.contains("x-session-id") 
         || http_str.contains("/ssh/") 
         || http_str.contains("/xhttp/") 
-
-        || http_str.contains("/revive/")
         || http_str.contains("X-Session")
     {
         if let Some((method, path)) = parse_http_request(&http_str) {
@@ -208,9 +204,8 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         sessions.remove(&sid);
     }
 
-    // *** OTIMIZAÇÃO PRINCIPAL: Conecta SSH primeiro mas com timeout agressivo ***
-    // Tentar conectar ao SSH primeiro garante que os dados iniciais do cliente não sejam perdidos
-    let ssh_conn = timeout(Duration::from_millis(500), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
+    // *** OTIMIZAÇÃO ULTRA: Conexão SSH imediata com timeout de 300ms ***
+    let ssh_conn = timeout(Duration::from_millis(300), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
     
     let (ssh, resp_status) = match ssh_conn {
         Ok(Ok(s)) => (Some(s), "200 OK"),
@@ -319,8 +314,8 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         sessions.remove(&sid);
     }
 
-    // *** OTIMIZAÇÃO: Conecta SSH primeiro com timeout agressivo ***
-    let ssh_conn = timeout(Duration::from_millis(500), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
+    // *** OTIMIZAÇÃO ULTRA: Conexão SSH imediata ***
+    let ssh_conn = timeout(Duration::from_millis(300), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
     
     let (ssh, resp_status) = match ssh_conn {
         Ok(Ok(s)) => (Some(s), "200 OK"),
@@ -466,8 +461,8 @@ fn extract_path_info(path: &str) -> (String, Option<u64>) {
     let p = path.split('?').next().unwrap_or(path).trim_start_matches('/').split('/').collect::<Vec<&str>>();
     if p.is_empty() || p[0].is_empty() { return (String::new(), None); }
     if p.len() >= 2 {
-        // Suporte para paths: /ssh/{id}, /xhttp/{id}, /split/{id}, /revive/{id}
-        if ["ssh", "xhttp", "revive"].contains(&p[0]) {
+        // Suporte para paths: /ssh/{id}, /xhttp/{id}
+        if ["ssh", "xhttp"].contains(&p[0]) {
             return (p[1].to_string(), if p.len() >= 3 { p[2].parse().ok() } else { None });
         }
         // Se só tem 1 segmento, usa como session ID

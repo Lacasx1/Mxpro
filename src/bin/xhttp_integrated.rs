@@ -89,7 +89,7 @@ async fn handle_xhttp_client(
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
     let mut peek_buf = [0u8; 32];
-    let peek_result = timeout(Duration::from_secs(3), stream.peek(&mut peek_buf)).await;
+    let peek_result = timeout(Duration::from_millis(500), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => 0,
@@ -150,7 +150,7 @@ async fn handle_tls_dual(
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") {
+    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") || http_str.contains("X-Session") {
         if let Some((method, path)) = parse_http_request(&http_str) {
             match method.as_str() {
                 "GET" => return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
@@ -174,7 +174,7 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
     
-    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") {
+    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") || http_str.contains("X-Session") {
         if let Some((method, path)) = parse_http_request(&http_str) {
             match method.as_str() {
                 "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
@@ -226,7 +226,7 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         sessions.remove(&sid);
     }
 
-    let ssh_conn = timeout(Duration::from_millis(500), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
+    let ssh_conn = timeout(Duration::from_millis(300), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
     let (ssh, resp_status) = match ssh_conn {
         Ok(Ok(s)) => (Some(s), "200 OK"),
         _ => (None, "200 OK"),
@@ -322,7 +322,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         sessions.remove(&sid);
     }
 
-    let ssh_conn = timeout(Duration::from_millis(500), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
+    let ssh_conn = timeout(Duration::from_millis(300), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await;
     let (ssh, resp_status) = match ssh_conn {
         Ok(Ok(s)) => (Some(s), "200 OK"),
         _ => (None, "200 OK"),

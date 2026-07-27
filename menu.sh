@@ -312,7 +312,7 @@ show_menu() {
     box_line "${WHITE}[01]${NC} - ABRIR PORTA"
     box_line "${WHITE}[02]${NC} - FECHAR PORTA"
     box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
-    box_line "${MAGENTA}[04]${NC} - xHTTP Pro Otimizado / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
+    box_line "${MAGENTA}[04]${NC} - xHTTP Pro Otimizado (443)"
     box_line "${BLUE}[05]${NC} - PROXY + PROTOCOLO INTEGRADO"
     box_line ""
     box_line "${WHITE}[00]${NC} - SAIR"
