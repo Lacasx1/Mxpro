@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# Mpro Menu - Free v5
+# Mpro Menu - Free v3
 # ============================================
 
 LKPROXY="/opt/mpro/proxy"
@@ -305,7 +305,7 @@ show_menu() {
     show_banner
     echo ""
     box_top
-    box_line "${WHITE}${BOLD}Mpro Menu Free v2.3${NC}"
+    box_line "${WHITE}${BOLD}Mpro Menu Free v3${NC}"
     box_mid
     show_active_ports
     box_mid
@@ -313,7 +313,7 @@ show_menu() {
     box_line "${WHITE}[02]${NC} - FECHAR PORTA"
     box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
     box_line "${MAGENTA}[04]${NC} - xHTTP_SSH / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
-    box_line "${BLUE}[05]${NC} - PROXY + PROTOCOLO INTEGRADO (DTUNNEL/XHTTP)"
+    box_line "${BLUE}[05]${NC} - PROXY + PROTOCOLO INTEGRADO"
     box_line ""
     box_line "${WHITE}[00]${NC} - SAIR"
     box_bottom
