@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mpro Installer - Version v3
+# Mxpro Installer - Version v3
 
 REPO_URL="https://github.com/Lacasx1/Mxpro.git"
 REPO_BRANCH="main"
@@ -46,9 +46,9 @@ echo -e "${BLUE}${BOLD} ██╔████╔██║██████╔�
 echo -e "${BLUE}${BOLD} ██║╚██╔╝██║██╔═══╝ ██╔══██╗██║   ██║${NC}"
 echo -e "${PURPLE}${BOLD} ██║ ╚═╝ ██║██║     ██║  ██║╚██████╔╝${NC}"
 echo -e "${BLUE}${BOLD} ╚═╝     ╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝ ${NC}"
-echo -e "${BLUE}${BOLD}         F R E E   V E R S I O N       ${NC}"
+echo -e "${YELLOW}${BOLD}         F R E E   V E R S I O N - 2026${NC}"
 echo -e "${BLUE}${BOLD}----------------------------------------${NC}"
-log_info "Iniciando instalação do Mpro v3.1.0 (🇧🇷)..."
+log_info "Iniciando instalação do Mxpro v1.1.0 (🇧🇷)..."
 
 # --- Etapa 1 ---
 show_progress "Atualizando dependências..."
